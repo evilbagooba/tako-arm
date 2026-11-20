@@ -1,6 +1,6 @@
 {
   "name": "tako-arm",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "A work board where every task knows which idea it came from. Track-and-link only: status, outcome and links over a project file.",
   "type": "module",

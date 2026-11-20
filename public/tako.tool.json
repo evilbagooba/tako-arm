@@ -4,5 +4,5 @@
   "title": "Work board",
   "tagline": "Every task knows which idea it came from.",
   "opens": ["project", "node", "work"],
-  "version": "0.3.0"
+  "version": "0.3.1"
 }
