@@ -1,6 +1,6 @@
 {
   "name": "tako-arm",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "A work board where every task knows which idea it came from. Track-and-link only: status, outcome and links over a project file.",
   "type": "module",
@@ -17,7 +17,7 @@
   "dependencies": {
     "react": "19.2.5",
     "react-dom": "19.2.5",
-    "tako": "github:evilbagooba/tako#v0.2.0",
+    "tako": "github:evilbagooba/tako#v0.3.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {

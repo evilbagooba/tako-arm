@@ -52,6 +52,16 @@ updated file elsewhere.
 Undo/redo: Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z. Drag a card between columns, or use
 its arrow buttons.
 
+## In the suite
+
+`public/tako.tool.json` is how this tool describes itself to the hub.
+Installed with `tako add evilbagooba/tako-arm`, it is served by the hub at
+`/arm/`. With other tools present, the top bar links to them for the open
+project, and a work item or node has "Show in graph", which opens the graph
+on that node. Links into this tool can carry `?node=<id>` or `?work=<id>`.
+Pushing a `v*` tag builds the page and attaches it to a release as
+`tako-tool.tgz` (`.github/workflows/release.yml`).
+
 ## Develop
 
 ```sh

@@ -1,0 +1,8 @@
+{
+  "id": "arm",
+  "name": "tako-arm",
+  "title": "Work board",
+  "tagline": "Every task knows which idea it came from.",
+  "opens": ["project", "node", "work"],
+  "version": "0.3.0"
+}

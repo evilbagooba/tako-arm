@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent as ReactDragEvent, type ReactNode } from "react";
 import { OpError, createLocalStore, migrateProject, type Op, type Project, type ProjectNode, type ProjectStore, type Work } from "tako";
-import { DEFAULT_HUB, connectHub, type Hub, type ProjectSummary } from "tako/client";
+import { DEFAULT_HUB, findHub, linkTarget, type Hub, type LinkTarget, type ProjectSummary, type ToolInfo, type ToolManifest } from "tako/client";
+import manifest from "../public/tako.tool.json";
 import {
   FINDING_MAX,
   STATUSES,
@@ -45,13 +46,49 @@ const uid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(
 const named = (s: string, fallback: string) => s.trim() || fallback;
 const isWebLink = (s: string) => /^https?:\/\//i.test(s.trim());
 const DRAG_TYPE = "application/x-work-id";
+/** How this tool describes itself to the hub and to the other tools. */
+const SELF = manifest as ToolManifest;
+
+/** The other tools reachable right now, for "open this in…" links. */
+function useOtherTools(hub: Hub | null): ToolInfo[] {
+  const [tools, setTools] = useState<ToolInfo[]>([]);
+  useEffect(() => {
+    if (!hub) return;
+    let live = true;
+    const load = () => void hub.tools().then((t) => live && setTools(t.filter((x) => x.id !== SELF.id)), () => {});
+    load();
+    const off = hub.onEvent((e) => {
+      if (e.type === "tools" || e.type === "resync") load();
+    });
+    return () => {
+      live = false;
+      off();
+    };
+  }, [hub]);
+  return tools;
+}
+
+/** Links that open something in each of the other tools. Each tool keeps
+ * to one tab, so following a link reuses it. */
+function ToolLinks({ hub, tools, target, verb, needs }: { hub: Hub; tools: ToolInfo[]; target: LinkTarget; verb?: string; needs?: "node" | "work" }) {
+  const shown = needs ? tools.filter((t) => t.opens.includes(needs)) : tools;
+  return (
+    <>
+      {shown.map((t) => (
+        <a key={t.id} className="btn" href={hub.linkTo(t, target)} target={`tako-${t.id}`} title={t.tagline}>
+          {verb ? `${verb} ${t.title.toLowerCase()}` : t.title} ↗
+        </a>
+      ))}
+    </>
+  );
+}
 
 /** An open project: held by the hub (shared with the other tools, saved as
  * you go) or opened from a file (saved when you say so). */
 type Loaded = {
   store: ProjectStore;
   key: string;
-  source: { kind: "hub"; id: string } | { kind: "file"; name: string; handle: FileHandle | null };
+  source: { kind: "hub"; id: string; hub: Hub } | { kind: "file"; name: string; handle: FileHandle | null };
   /** Where the store reports edits the hub refused. */
   rejected: { current: (message: string) => void };
 };
@@ -74,7 +111,7 @@ export function App() {
     const rejected = { current: (_: string) => {} };
     try {
       const store = await h.open(id, { onRejected: (m) => rejected.current(m) });
-      setLoaded({ store, key: `hub:${id}:${Date.now()}`, source: { kind: "hub", id }, rejected });
+      setLoaded({ store, key: `hub:${id}:${Date.now()}`, source: { kind: "hub", id, hub: h }, rejected });
       setProjectParam(id);
       setError(null);
     } catch (e) {
@@ -85,8 +122,7 @@ export function App() {
 
   useEffect(() => {
     let live = true;
-    const url = new URLSearchParams(location.search).get("hub") ?? DEFAULT_HUB;
-    void connectHub(url, { clientName: "tako-arm" }).then(async (h) => {
+    void findHub({ tool: SELF }).then(async (h) => {
       if (!live) return;
       const id = projectParam();
       if (h && id) await openFromHub(h, id);
@@ -282,7 +318,17 @@ function BoardScreen({ loaded, onClose }: { loaded: Loaded; onClose: () => void 
   const [handle, setHandle] = useState<FileHandle | null>(source.kind === "file" ? source.handle : null);
   const dirty = !inHub && project !== saved;
   const [notice, setNotice] = useState("");
-  const [selection, setSelection] = useState<Selection>(null);
+  // A link from another tool can point at a node or a work item.
+  const [selection, setSelection] = useState<Selection>(() => {
+    const asked = linkTarget();
+    const p = store.get().project;
+    if (asked.work && p.work.some((w) => w.id === asked.work)) return { type: "work", id: asked.work };
+    if (asked.node && p.nodes.some((n) => n.id === asked.node)) return { type: "node", id: asked.node };
+    return null;
+  });
+  const hub = source.kind === "hub" ? source.hub : null;
+  const hubId = source.kind === "hub" ? source.id : "";
+  const tools = useOtherTools(hub);
   const [kind, setKind] = useState("");
   const [query, setQuery] = useState("");
   const [column, setColumn] = useState<Status>("todo");
@@ -425,6 +471,7 @@ function BoardScreen({ loaded, onClose }: { loaded: Loaded; onClose: () => void 
           <h1 title={project.title}>{named(project.title, "Untitled graph")}</h1>
         </div>
         <div className="row wrap topbar-actions">
+          {hub && <ToolLinks hub={hub} tools={tools} target={{ project: hubId, node: contextNodeId, work: selectedWork?.id }} />}
           <span className="label save-state" data-dirty={dirty || snap.sync === "offline" || undefined}>
             {inHub ? SYNC_LABEL[snap.sync] : dirty ? "Unsaved changes" : "Saved"}
           </span>
@@ -556,7 +603,9 @@ function BoardScreen({ loaded, onClose }: { loaded: Loaded; onClose: () => void 
                 onPromoted={() => setNotice("Promoted: an evidence node was added to the graph.")}
               />
             )}
-            <Why project={project} context={context} onSelectNode={selectNode} onSelectWork={selectWork} currentWorkId={selectedWork?.id ?? null} />
+            <Why project={project} context={context} onSelectNode={selectNode} onSelectWork={selectWork} currentWorkId={selectedWork?.id ?? null}>
+              {hub && <ToolLinks hub={hub} tools={tools} target={{ project: hubId, node: context.node.id, work: selectedWork?.id }} verb="Show in" needs="node" />}
+            </Why>
           </div>
         </aside>
       )}
@@ -963,7 +1012,9 @@ function Why({
   onSelectNode,
   onSelectWork,
   currentWorkId,
+  children,
 }: {
+  children?: ReactNode;
   project: Project;
   context: NodeContext;
   onSelectNode: (id: string) => void;
@@ -994,6 +1045,7 @@ function Why({
       )}
 
       <MiniMap project={project} focusId={node.id} onSelectNode={onSelectNode} />
+      {children && <div className="row wrap">{children}</div>}
 
       {connections.length > 0 ? (
         <ul className="plain-list connections">
