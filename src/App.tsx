@@ -1,19 +1,6 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type ReactNode } from "react";
-import {
-  OpError,
-  canRedo,
-  canUndo,
-  commit,
-  createHistory,
-  migrateProject,
-  redo,
-  undo,
-  type History,
-  type Op,
-  type Project,
-  type ProjectNode,
-  type Work,
-} from "core";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent as ReactDragEvent, type ReactNode } from "react";
+import { OpError, createLocalStore, migrateProject, type Op, type Project, type ProjectNode, type ProjectStore, type Work } from "tako";
+import { DEFAULT_HUB, connectHub, type Hub, type ProjectSummary } from "tako/client";
 import {
   FINDING_MAX,
   STATUSES,
@@ -59,38 +46,127 @@ const named = (s: string, fallback: string) => s.trim() || fallback;
 const isWebLink = (s: string) => /^https?:\/\//i.test(s.trim());
 const DRAG_TYPE = "application/x-work-id";
 
-type Loaded = { project: Project; name: string; handle: FileHandle | null; key: number };
+/** An open project: held by the hub (shared with the other tools, saved as
+ * you go) or opened from a file (saved when you say so). */
+type Loaded = {
+  store: ProjectStore;
+  key: string;
+  source: { kind: "hub"; id: string } | { kind: "file"; name: string; handle: FileHandle | null };
+  /** Where the store reports edits the hub refused. */
+  rejected: { current: (message: string) => void };
+};
+
+const projectParam = () => new URLSearchParams(location.search).get("project");
+function setProjectParam(id: string | null) {
+  const url = new URL(location.href);
+  if (id) url.searchParams.set("project", id);
+  else url.searchParams.delete("project");
+  history.replaceState(null, "", url);
+}
 
 export function App() {
+  // undefined: still looking for the hub. null: none running.
+  const [hub, setHub] = useState<Hub | null | undefined>(undefined);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const open = useCallback((f: OpenedFile) => {
+  const openFromHub = useCallback(async (h: Hub, id: string) => {
+    const rejected = { current: (_: string) => {} };
     try {
-      const project = migrateProject(JSON.parse(f.text), f.name.replace(/\.json$/i, ""));
-      setLoaded({ project, name: f.name, handle: f.handle, key: Date.now() });
+      const store = await h.open(id, { onRejected: (m) => rejected.current(m) });
+      setLoaded({ store, key: `hub:${id}:${Date.now()}`, source: { kind: "hub", id }, rejected });
+      setProjectParam(id);
+      setError(null);
+    } catch (e) {
+      setProjectParam(null);
+      setError(e instanceof Error ? e.message : "Couldn't open that project.");
+    }
+  }, []);
+
+  useEffect(() => {
+    let live = true;
+    const url = new URLSearchParams(location.search).get("hub") ?? DEFAULT_HUB;
+    void connectHub(url, { clientName: "tako-arm" }).then(async (h) => {
+      if (!live) return;
+      const id = projectParam();
+      if (h && id) await openFromHub(h, id);
+      if (live) setHub(h);
+    });
+    return () => {
+      live = false;
+    };
+  }, [openFromHub]);
+
+  const openFile = useCallback((f: OpenedFile) => {
+    try {
+      const project = migrateProject(JSON.parse(f.text), f.name.replace(/(\.tako)?\.json$/i, ""));
+      setLoaded({
+        store: createLocalStore(project),
+        key: `file:${Date.now()}`,
+        source: { kind: "file", name: f.name, handle: f.handle },
+        rejected: { current: () => {} },
+      });
       setError(null);
     } catch {
       setError(`“${f.name}” isn't a project file this version can read.`);
     }
   }, []);
 
-  return loaded ? (
-    <BoardScreen key={loaded.key} loaded={loaded} onClose={() => setLoaded(null)} />
-  ) : (
-    <OpenScreen error={error} onOpen={open} />
-  );
+  if (loaded) {
+    return (
+      <BoardScreen
+        key={loaded.key}
+        loaded={loaded}
+        onClose={() => {
+          loaded.store.close();
+          setProjectParam(null);
+          setLoaded(null);
+        }}
+      />
+    );
+  }
+  if (hub === undefined) return <main className="paper open-screen" aria-busy="true" />;
+  return <OpenScreen hub={hub} error={error} onOpenFile={openFile} onOpenProject={(id) => hub && void openFromHub(hub, id)} />;
 }
 
-function OpenScreen({ error, onOpen }: { error: string | null; onOpen: (f: OpenedFile) => void }) {
+function useProjectList(hub: Hub | null) {
+  const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
+  useEffect(() => {
+    if (!hub) return;
+    let live = true;
+    const load = () => void hub.list().then((p) => live && setProjects(p), () => {});
+    load();
+    const off = hub.onEvent((e) => {
+      if (e.type !== "project") load();
+    });
+    return () => {
+      live = false;
+      off();
+    };
+  }, [hub]);
+  return projects;
+}
+
+function OpenScreen({
+  hub,
+  error,
+  onOpenFile,
+  onOpenProject,
+}: {
+  hub: Hub | null;
+  error: string | null;
+  onOpenFile: (f: OpenedFile) => void;
+  onOpenProject: (id: string) => void;
+}) {
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const projects = useProjectList(hub);
 
   // Drop a file anywhere to open it.
   useEffect(() => {
     const over = (e: DragEvent) => e.preventDefault();
     const drop = (e: DragEvent) => {
       e.preventDefault();
-      if (e.dataTransfer) void droppedFile(e.dataTransfer).then((f) => f && onOpen(f));
+      if (e.dataTransfer) void droppedFile(e.dataTransfer).then((f) => f && onOpenFile(f));
     };
     window.addEventListener("dragover", over);
     window.addEventListener("drop", drop);
@@ -98,20 +174,45 @@ function OpenScreen({ error, onOpen }: { error: string | null; onOpen: (f: Opene
       window.removeEventListener("dragover", over);
       window.removeEventListener("drop", drop);
     };
-  }, [onOpen]);
+  }, [onOpenFile]);
 
   return (
     <main className="paper open-screen">
       <div className="open-card">
         <div>
-          <p className="label">Work</p>
+          <p className="label">tako-arm · work board</p>
           <h1>Every task knows which idea it came from</h1>
         </div>
         <p className="dim">
-          Open a project file exported from the graph tool. Its work items appear as a board,
-          grouped by the node each one was spawned from. The work itself happens elsewhere; this
-          records status, links and the outcome in your own words.
+          A project's work items as a board, grouped by the node each one was spawned from. The
+          work itself happens elsewhere; this records status, links and the outcome in your own
+          words.
         </p>
+
+        {hub && (
+          <section className="project-list island" aria-label="Projects">
+            <p className="label project-list-head">
+              Projects <span className="mono">{hub.dir}</span>
+            </p>
+            {projects === null ? null : projects.length === 0 ? (
+              <p className="dim small project-list-empty">No projects in the hub yet. Make one in the graph tool, or open a file below.</p>
+            ) : (
+              <ul>
+                {projects.map((p) => (
+                  <li key={p.id}>
+                    <button type="button" onClick={() => onOpenProject(p.id)}>
+                      <span className="project-title">{named(p.title, "Untitled")}</span>
+                      <span className="label">
+                        {p.work} work · {p.nodes} nodes
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+
         <div className="row wrap">
           <input
             ref={fileRef}
@@ -122,37 +223,38 @@ function OpenScreen({ error, onOpen }: { error: string | null; onOpen: (f: Opene
             onChange={(e) => {
               const f = e.target.files?.[0];
               e.target.value = "";
-              if (f) void f.text().then((text) => onOpen({ text, name: f.name, handle: null }));
+              if (f) void f.text().then((text) => onOpenFile({ text, name: f.name, handle: null }));
             }}
           />
           <button
             type="button"
             className="btn"
-            data-variant="primary"
+            data-variant={hub ? undefined : "primary"}
             onClick={async () => {
               const picked = await pickFile();
               if (picked === "unsupported") fileRef.current?.click();
-              else if (picked) onOpen(picked);
+              else if (picked) onOpenFile(picked);
             }}
           >
-            Open project file…
+            Open a file…
           </button>
           <button
             type="button"
             className="btn"
             onClick={async () => {
-              const mod = await import("core/fixtures/sourdough.json");
-              onOpen({ text: JSON.stringify(mod.default), name: "example-sourdough.json", handle: null });
+              const mod = await import("tako/fixtures/sourdough.json");
+              onOpenFile({ text: JSON.stringify(mod.default), name: "example-sourdough.json", handle: null });
             }}
           >
             Try an example
           </button>
         </div>
-        <p className="label">or drop a .json file anywhere</p>
         <p className="dim small">
-          {canSaveInPlace()
-            ? "Nothing is uploaded. Save writes back to the file you opened."
-            : "Nothing is uploaded. In this browser, Save downloads the updated file."}
+          {hub
+            ? "Hub projects are shared with the other tools and saved as you go. A file you open here stays a file."
+            : `No hub found at ${DEFAULT_HUB}. Run “tako” to share projects between tools; until then, open a file${
+                canSaveInPlace() ? " and Save writes back to it." : " and Save downloads the updated copy."
+              }`}
         </p>
         {error && (
           <p role="alert" className="danger">
@@ -167,46 +269,58 @@ function OpenScreen({ error, onOpen }: { error: string | null; onOpen: (f: Opene
 type Selection = { type: "work"; id: string } | { type: "node"; id: string } | null;
 type Dispatch = (ops: readonly Op[], coalesceKey?: string) => boolean;
 
-function BoardScreen({ loaded, onClose }: { loaded: Loaded; onClose: () => void }) {
-  const [history, setHistory] = useState<History>(() => createHistory(loaded.project));
-  const historyRef = useRef(history);
-  historyRef.current = history;
-  const project = history.present;
+const SYNC_LABEL = { saved: "Saved", saving: "Saving…", offline: "Hub unreachable · changes kept here", local: "" } as const;
 
-  const [saved, setSaved] = useState<Project>(loaded.project);
-  const [handle, setHandle] = useState<FileHandle | null>(loaded.handle);
-  const dirty = project !== saved;
+function BoardScreen({ loaded, onClose }: { loaded: Loaded; onClose: () => void }) {
+  const { store, source } = loaded;
+  const snap = useSyncExternalStore(store.subscribe, store.get);
+  const project = snap.project;
+  const inHub = source.kind === "hub";
+
+  // A file is saved on request, so track what the last save held.
+  const [saved, setSaved] = useState<Project>(() => store.get().project);
+  const [handle, setHandle] = useState<FileHandle | null>(source.kind === "file" ? source.handle : null);
+  const dirty = !inHub && project !== saved;
   const [notice, setNotice] = useState("");
   const [selection, setSelection] = useState<Selection>(null);
   const [kind, setKind] = useState("");
   const [query, setQuery] = useState("");
   const [column, setColumn] = useState<Status>("todo");
 
-  // Every change goes through here, as core ops: one undo step per call
+  useEffect(() => {
+    loaded.rejected.current = setNotice;
+  }, [loaded]);
+
+  // Every change goes through here, as tako ops: one undo step per call
   // (calls sharing a coalesce key within a second merge, e.g. typing).
-  const dispatch = useCallback<Dispatch>((ops, coalesceKey) => {
-    if (ops.length === 0) return true;
-    try {
-      const next = commit(historyRef.current, ops, { coalesceKey });
-      historyRef.current = next;
-      setHistory(next);
-      return true;
-    } catch (e) {
-      setNotice(e instanceof OpError ? `Couldn't apply that: ${e.message}` : "Couldn't apply that change.");
-      return false;
-    }
-  }, []);
+  const dispatch = useCallback<Dispatch>(
+    (ops, coalesceKey) => {
+      if (ops.length === 0) return true;
+      try {
+        store.dispatch(ops, { coalesceKey });
+        return true;
+      } catch (e) {
+        setNotice(e instanceof OpError ? `Couldn't apply that: ${e.message}` : "Couldn't apply that change.");
+        return false;
+      }
+    },
+    [store],
+  );
 
-  const step = useCallback((fn: (h: History) => History, label: string) => {
-    const next = fn(historyRef.current);
-    if (next === historyRef.current) return;
-    historyRef.current = next;
-    setHistory(next);
-    setNotice(label);
-  }, []);
+  const step = useCallback(
+    (which: "undo" | "redo") => {
+      const s = store.get();
+      if (which === "undo" ? !s.canUndo : !s.canRedo) return;
+      store[which]();
+      setNotice(which === "undo" ? "Undone." : "Redone.");
+    },
+    [store],
+  );
 
+  const fileName = source.kind === "file" ? source.name : "";
   const save = useCallback(async () => {
-    const current = historyRef.current.present;
+    if (inHub) return; // the hub saves as you go
+    const current = store.get().project;
     let text: string;
     try {
       text = serialize(current);
@@ -225,10 +339,10 @@ function BoardScreen({ loaded, onClose }: { loaded: Loaded; onClose: () => void 
         setHandle(null); // permission refused or the file moved: fall back
       }
     }
-    download(loaded.name, text);
+    download(fileName, text);
     setSaved(current);
-    setNotice(`Downloaded ${loaded.name}. Replace your old copy with it.`);
-  }, [handle, loaded.name]);
+    setNotice(`Downloaded ${fileName}. Replace your old copy with it.`);
+  }, [inHub, store, handle, fileName]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -244,11 +358,10 @@ function BoardScreen({ loaded, onClose }: { loaded: Loaded; onClose: () => void 
       const typing = t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement;
       if (mod && !typing && key === "z") {
         e.preventDefault();
-        if (e.shiftKey) step(redo, "Redone.");
-        else step(undo, "Undone.");
+        step(e.shiftKey ? "redo" : "undo");
       } else if (mod && !typing && key === "y") {
         e.preventDefault();
-        step(redo, "Redone.");
+        step("redo");
       } else if (e.key === "Escape" && !e.defaultPrevented) {
         setSelection(null);
       }
@@ -257,12 +370,13 @@ function BoardScreen({ loaded, onClose }: { loaded: Loaded; onClose: () => void 
     return () => window.removeEventListener("keydown", onKey);
   }, [save, step]);
 
+  const unsent = dirty || snap.sync === "saving" || snap.sync === "offline";
   useEffect(() => {
-    if (!dirty) return;
+    if (!unsent) return;
     const warn = (e: BeforeUnloadEvent) => e.preventDefault();
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
+  }, [unsent]);
 
   const board = useMemo(() => buildBoard(project, { kind, query }), [project, kind, query]);
   const kinds = useMemo(() => [...new Set([...board.kinds, ...SUGGESTED_KINDS])], [board.kinds]);
@@ -284,10 +398,10 @@ function BoardScreen({ loaded, onClose }: { loaded: Loaded; onClose: () => void 
   const selectNode = useCallback((id: string) => setSelection({ type: "node", id }), []);
   const moveTo = useCallback(
     (workId: string, status: Status) => {
-      const w = historyRef.current.present.work.find((x) => x.id === workId);
+      const w = store.get().project.work.find((x) => x.id === workId);
       if (w) dispatch(setStatus(w, status));
     },
-    [dispatch],
+    [dispatch, store],
   );
   const add = useCallback(
     (nodeId: string, title: string) => {
@@ -299,6 +413,7 @@ function BoardScreen({ loaded, onClose }: { loaded: Loaded; onClose: () => void 
 
   const close = () => {
     if (dirty && !window.confirm("Close without saving? Your changes since the last save will be lost.")) return;
+    if (snap.sync === "offline" && !window.confirm("The hub is unreachable, so your latest changes haven't been saved. Close anyway?")) return;
     onClose();
   };
 
@@ -306,22 +421,24 @@ function BoardScreen({ loaded, onClose }: { loaded: Loaded; onClose: () => void 
     <div className="app paper" data-panel={panelOpen || undefined}>
       <header className="topbar island">
         <div className="topbar-title">
-          <p className="label">Work board</p>
+          <p className="label">{inHub ? "Work board · tako" : `Work board · ${fileName}`}</p>
           <h1 title={project.title}>{named(project.title, "Untitled graph")}</h1>
         </div>
         <div className="row wrap topbar-actions">
-          <span className="label save-state" data-dirty={dirty || undefined}>
-            {dirty ? "Unsaved changes" : "Saved"}
+          <span className="label save-state" data-dirty={dirty || snap.sync === "offline" || undefined}>
+            {inHub ? SYNC_LABEL[snap.sync] : dirty ? "Unsaved changes" : "Saved"}
           </span>
-          <button type="button" className="btn" data-variant="ghost" disabled={!canUndo(history)} onClick={() => step(undo, "Undone.")} aria-label="Undo" title="Undo (Ctrl+Z)">
+          <button type="button" className="btn" data-variant="ghost" disabled={!snap.canUndo} onClick={() => step("undo")} aria-label="Undo" title="Undo (Ctrl+Z)">
             ↶
           </button>
-          <button type="button" className="btn" data-variant="ghost" disabled={!canRedo(history)} onClick={() => step(redo, "Redone.")} aria-label="Redo" title="Redo (Ctrl+Shift+Z)">
+          <button type="button" className="btn" data-variant="ghost" disabled={!snap.canRedo} onClick={() => step("redo")} aria-label="Redo" title="Redo (Ctrl+Shift+Z)">
             ↷
           </button>
-          <button type="button" className="btn" data-variant="primary" disabled={!dirty} onClick={() => void save()} title="Ctrl+S">
-            {handle ? "Save" : "Save (download)"}
-          </button>
+          {!inHub && (
+            <button type="button" className="btn" data-variant="primary" disabled={!dirty} onClick={() => void save()} title="Ctrl+S">
+              {handle ? "Save" : "Save (download)"}
+            </button>
+          )}
           <button type="button" className="btn" onClick={close}>
             Close
           </button>

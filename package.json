@@ -1,6 +1,6 @@
 {
-  "name": "work",
-  "version": "0.1.0",
+  "name": "tako-arm",
+  "version": "0.2.0",
   "private": true,
   "description": "A work board where every task knows which idea it came from. Track-and-link only: status, outcome and links over a project file.",
   "type": "module",
@@ -15,9 +15,9 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
-    "core": "github:evilbagooba/core#v0.1.0",
     "react": "19.2.5",
     "react-dom": "19.2.5",
+    "tako": "github:evilbagooba/tako#v0.2.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {

@@ -2,10 +2,10 @@
 // produce. Track-and-link only: nothing here runs work, it records status,
 // outcomes and links, and keeps every item tied to the idea it came from.
 //
-// Pure and framework-free, so it's tested against core's fixture projects.
-// Every change is expressed as core ops; this module never edits a project.
+// Pure and framework-free, so it's tested against tako's fixture projects.
+// Every change is expressed as tako ops; this module never edits a project.
 
-import type { Artifact, Narrative, Op, Project, ProjectEdge, ProjectNode, Work } from "core/model";
+import type { Artifact, Narrative, Op, Project, ProjectEdge, ProjectNode, Work } from "tako/model";
 
 export type Status = Work["status"];
 export const STATUSES: readonly Status[] = ["todo", "doing", "done"];

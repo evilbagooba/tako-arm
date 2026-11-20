@@ -2,7 +2,7 @@
 // browser and written back either in place (browsers with the File System
 // Access API, after the user approves it) or as a download.
 
-import { normalizeProject, projectSchema, type Project } from "core";
+import { normalizeProject, projectSchema, type Project } from "tako";
 
 type WritableHandle = {
   name: string;

@@ -1,10 +1,10 @@
-// Contract tests: the board against core's fixture projects. If these pass
-// after a core bump, the work tool still fits the suite's file format.
+// Contract tests: the board against tako's fixture projects. If these pass
+// after a tako bump, the work tool still fits the suite's file format.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { applyOps, migrateProject, parseOps, projectSchema, reviewOps, type Project } from "core";
+import { applyOps, migrateProject, parseOps, projectSchema, reviewOps, type Project } from "tako";
 import {
   STATUSES,
   WORK_PROVENANCE,
@@ -20,12 +20,12 @@ import {
 
 const FIXTURES = ["bird-feeder.json", "sourdough.json", "v0-unversioned.json"];
 const load = (name: string): Project =>
-  migrateProject(JSON.parse(readFileSync(new URL(import.meta.resolve(`core/fixtures/${name}`)), "utf8")));
+  migrateProject(JSON.parse(readFileSync(new URL(import.meta.resolve(`tako/fixtures/${name}`)), "utf8")));
 
-/** Ops the board builds must be valid to core (as if they came from
+/** Ops the board builds must be valid to tako (as if they came from
  * outside) and leave a project that still validates. */
 function apply(p: Project, ops: ReturnType<typeof spawnWork>): Project {
-  assert.deepEqual(parseOps(ops), ops, "ops survive core's validation unchanged");
+  assert.deepEqual(parseOps(ops), ops, "ops survive tako's validation unchanged");
   assert.equal(reviewOps(p, ops).error, null);
   const next = applyOps(p, ops);
   assert.deepEqual(projectSchema.parse(next), next);
